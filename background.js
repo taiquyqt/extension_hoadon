@@ -123,7 +123,7 @@ function formatDateDDMMYYYY(dateInput) {
 
 
 // =========================================================================
-// 4. FETCH DỮ LIỆU TỪ 2 NGUỒN (THUẾ & MISA MEINVOICE)
+// 4. FETCH DỮ LIỆU TỪ 2 NGUỒN (THUẾ & MISA MEINVOICE KHỚP F12 GỐC 100%)
 // =========================================================================
 
 /**
@@ -200,35 +200,51 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
 
   sendLog(`🔍 Kết nối API MISA meInvoice (app3.meinvoice.vn)...`, 'process');
 
-  // ĐỊNH DẠNG NGÀY CHO MISA: MISA C# NewtonSoft Parser yêu cầu YYYY-MM-DD HH:mm:ss (không chứa ký tự 'T')
-  const fromIso = `${startDateStr} 00:00:00`;
-  const toIso = `${endDateStr} 23:59:59`;
+  const fromIsoQuoted = JSON.stringify(`${startDateStr}T00:00:00.000Z`);
+  const toIsoQuoted   = JSON.stringify(`${endDateStr}T23:59:59.000Z`);
 
-  const requestBody = new URLSearchParams({
-    draw: 1,
-    fromDate: fromIso,
-    toDate: toIso,
-    publishStatus: -1,
-    sendEmailStatus: -1,
-    filterInvoiceStatus: -1, // Tất cả trạng thái hóa đơn
-    sendToTaxStatus: -1,
-    invoiceSummaryStatus: -2,
-    searchField: "InvNo",
-    filterCustomField: false
-  }).toString();
+  const bodyParams = new URLSearchParams();
+  bodyParams.append('draw', '1');
+  bodyParams.append('fromDate', fromIsoQuoted);
+  bodyParams.append('toDate', toIsoQuoted);
+  bodyParams.append('publishStatus', '-1');
+  bodyParams.append('sendEmailStatus', '-1');
+  bodyParams.append('searchKey', '');
+  bodyParams.append('filterInvoiceStatus', '0');
+  bodyParams.append('sendToTaxStatus', '-1');
+  bodyParams.append('invoiceSummaryStatus', '-2');
+  bodyParams.append('searchField', 'InvNo');
+  bodyParams.append('keyValue', '');
+  bodyParams.append('filterCustomField', 'false');
+  bodyParams.append('buyerSignature', '');
+  bodyParams.append('filterPaymentStatus', '');
+  bodyParams.append('lstOrganizationUnit', '');
+  bodyParams.append('invTemplate', '');
+  bodyParams.append('approveSteps', '');
+  bodyParams.append('gridSort', '`PublishStatus` ASC,`InvDate` DESC, `InvNo` DESC, `SortOrder` ASC');
+  bodyParams.append('sort', '');
+  bodyParams.append('columns', 'InvSeries,InvDate,InvNo,InvoiceCode,AccountObjectName,AccountObjectTaxCode,RelatedUnitCode,PaymentStatus,TotalAmount,EInvoiceStatus,PublishStatus,TransactionID,SendInvoiceStatus,BuyerSignatureStatus,RefID,SendToTaxStatus,ApproveStep,CurrencyCode,OrganizationUnitID,EditVersion,AccountObjectCode,TotalAmountOC,ContactName,ReceiverEmail,ReceiverMobile,InvoiceType,CustomData,SendExplanationStatus,IsTemplatePetrol,BusinessArea,IsTradeDiscountInvoice,ListNo,ListDate,SortOrder');
+  bodyParams.append('filter', '[]');
+  bodyParams.append('start', '0');
+  bodyParams.append('length', '100');
+  bodyParams.append('pagingType', '0');
 
-  console.log("🔍 [Debug MISA Request Body]:", requestBody);
+  const requestBodyStr = bodyParams.toString();
+  console.log("🔍 [Debug F12 Matched MISA Request Body]:", requestBodyStr.substr(0, 300));
 
   try {
     const response = await fetch(API_MISA_LIST_ENDPOINT, {
       method: "POST",
-      credentials: "include", // Tự động đính kèm Cookie phiên MISA
+      credentials: "include",
       headers: {
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-Requested-With": "XMLHttpRequest"
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "CompanyTaxCode": "0402336899",
+        "__InvType": "5",
+        "__SysVersion": "10"
       },
-      body: requestBody
+      body: requestBodyStr
     });
 
     if (!response.ok) {
@@ -260,7 +276,6 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
       console.warn("[fetchMisaInvoices] MISA Backend báo lỗi:", responseJson.error);
     }
     
-    // Parse 2 lớp cho responseJson.data của MISA
     let invoiceArray = [];
     if (responseJson && responseJson.data) {
       invoiceArray = typeof responseJson.data === 'string' ? JSON.parse(responseJson.data) : responseJson.data;
@@ -268,20 +283,30 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
       invoiceArray = responseJson;
     }
 
-    console.log("🔍 [Debug] Đã lấy được data MISA, số lượng:", invoiceArray.length);
+    console.log("🎉 [Debug MISA SUCCESS] Số lượng hóa đơn trích xuất được:", invoiceArray.length);
     sendLog(`📄 Thu thập thành công ${invoiceArray.length} hóa đơn từ MISA meInvoice.`, 'info');
 
-    // MAP DỮ LIỆU MISA SANG CẤU TRÚC CHUẨN
     const mappedInvoices = invoiceArray.map(misaInv => {
       const invDateStr = misaInv.InvDate ? (typeof misaInv.InvDate === 'string' ? misaInv.InvDate.split('T')[0] : misaInv.InvDate) : "";
       
+      // Bỏ số 0 ở đầu số hóa đơn (ví dụ: '00000004' -> '4')
+      const cleanSoHD = misaInv.InvNo ? (parseInt(misaInv.InvNo, 10) || misaInv.InvNo).toString() : "";
+      
+      // Bỏ số mẫu số ở đầu ký hiệu (ví dụ: '1C26TMK' -> 'C26TMK')
+      const rawSeries = misaInv.InvSeries || "";
+      const cleanKyHieuHD = rawSeries ? rawSeries.replace(/^[0-9]/, '') : "";
+
       return {
-        mstNguoiBan: "0402336899", // MST công ty bán ra
+        mstNguoiBan: "0402336899",
+        nbten: "CÔNG TY CỔ PHẦN MARKEE",
         mstNguoiMua: misaInv.AccountObjectTaxCode || "",
+        nmmst: misaInv.AccountObjectTaxCode || "",
+        nmten: misaInv.AccountObjectName || "",
         tdlap: invDateStr,
         tgtttbso: Number(misaInv.TotalAmount) || 0,
-        soHoaDon: misaInv.InvNo ? misaInv.InvNo.toString() : "", 
-        kyHieuHoaDon: misaInv.InvSeries || "",
+        tgtcthue: Number(misaInv.TotalAmount) || 0,
+        soHoaDon: cleanSoHD, 
+        kyHieuHoaDon: cleanKyHieuHD,
         misaRawData: misaInv 
       };
     });
@@ -297,7 +322,7 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
 
 
 // =========================================================================
-// 5. DATA MAPPING & DEDUPLICATION (DETERMINISTIC UUID v5 & PAYLOAD SUPABASE)
+// 5. DATA MAPPING & DEDUPLICATION (CHUẨN HÓA CẤU TRÚC JSON KHỚP 100% SUPABASE)
 // =========================================================================
 
 function uuidToBytes(uuidStr) {
@@ -331,62 +356,63 @@ async function generateUUIDv5(inputStr) {
   return `${hex.substr(0, 8)}-${hex.substr(8, 4)}-${hex.substr(12, 4)}-${hex.substr(16, 4)}-${hex.substr(20, 12)}`;
 }
 
+/**
+ * Map dữ liệu hóa đơn thành JSON Object chuẩn xác 100% theo yêu cầu hệ thống
+ */
 async function mapToSupabasePayload(taxData) {
   try {
-    const mstNguoiBan = taxData.mstNguoiBan || taxData.nbmst || "";
+    const mstNguoiBan = taxData.mstNguoiBan || taxData.nbmst || "0402336899";
     const mstNguoiMua = taxData.mstNguoiMua || taxData.nmmst || taxData.maSoThue || "";
     
-    let tdlapStr = "";
-    if (taxData.tdlap) {
-      if (typeof taxData.tdlap === 'string') {
-        if (taxData.tdlap.includes('T')) {
-          tdlapStr = taxData.tdlap.split('T')[0];
-        } else if (taxData.tdlap.includes(' ')) {
-          tdlapStr = taxData.tdlap.split(' ')[0];
-        } else {
-          tdlapStr = taxData.tdlap;
-        }
-      }
-    }
+    // Chuẩn hóa ký hiệu hóa đơn (Bỏ số mẫu số ở đầu nếu có, ví dụ '1C26TMK' -> 'C26TMK')
+    const rawKyHieu = taxData.kyHieuHoaDon || taxData.khhdon || "";
+    const cleanKyHieuHD = rawKyHieu ? rawKyHieu.replace(/^[0-9]/, '') : "";
 
-    const tgtttbso = Number(taxData.tgtttbso || taxData.tongTien) || 0;
-    const soHoaDon = taxData.soHoaDon ? taxData.soHoaDon.toString() : (taxData.shdon ? taxData.shdon.toString() : "");
-    const kyHieuHoaDon = taxData.kyHieuHoaDon || taxData.khhdon || "";
+    // Chuẩn hóa số hóa đơn (Bỏ số 0 ở đầu, ví dụ '00000004' -> '4')
+    const rawSoHD = taxData.soHoaDon ? taxData.soHoaDon.toString() : (taxData.shdon ? taxData.shdon.toString() : "");
+    const cleanSoHD = rawSoHD ? (parseInt(rawSoHD, 10) || rawSoHD).toString() : "";
 
-    const rawInputKey = `${mstNguoiBan}${kyHieuHoaDon}${soHoaDon}`;
+    // 1. UUID v5 cố định theo key: mstNguoiBan + cleanKyHieuHD + cleanSoHD
+    // Ví dụ: '0402336899' + 'C26TMK' + '4' -> Generate UUID 'bc15f457-eb92-546c-98a7-c0b53f9341e0'
+    const rawInputKey = `${mstNguoiBan}${cleanKyHieuHD}${cleanSoHD}`;
     const invoiceUuid = await generateUUIDv5(rawInputKey);
 
     const isoNow = new Date().toISOString();
 
+    const tgtttbso = Number(taxData.tgtttbso || taxData.tongTien) || 0;
+    const tongTruocThueVal = Number(taxData.tgtcthue || taxData.tongTruocThue) || tgtttbso;
+
+    // CẤU TRÚC JSON DATA CHUẨN XÁC 100% THEO YÊU CẦU CỦA BẠN:
     const dataContent = {
       "id": invoiceUuid,
-      "soHoaDon": soHoaDon,
-      "nguonDuLieu": taxData.misaRawData ? "MISA_MEINVOICE" : "CO_QUAN_THUE",
-      "kyHieuHoaDon": kyHieuHoaDon,
       "ngay": formatDateDDMMYYYY(taxData.tdlap),
-      "tdlap": tdlapStr,
-      "khachHang": taxData.nmten || taxData.khachHang || "",
-      "maSoThue": mstNguoiMua,
-      "mstNguoiMua": mstNguoiMua,
-      "diaChi": taxData.nbdchi || taxData.diaChi || "", 
-      "trangThai": "Hóa đơn mới",
-      "nguoiBan": taxData.nbten || taxData.nguoiBan || "",
-      "mstNguoiBan": mstNguoiBan,
-      "mauSo": "1",
-      "donViTienTe": taxData.dvtte || "VND",
-      "ketQuaKiemTra": "Đã cấp mã hóa đơn",
-      "trangThaiPhatHanh": "Đã cấp mã",
       "items": taxData.items || [],
-      "tongTien": tgtttbso,
-      "tgtttbso": tgtttbso,
-      "tongTruocThue": taxData.tgtcthue || taxData.tongTruocThue || 0,
-      "workspaceId": "default",
+      "mauSo": "1",
+      "thieu": [
+        "Category",
+        "Bộ phận",
+        "Dự án",
+        "Nội dung"
+      ],
+      "diaChi": taxData.nbdchi || taxData.diaChi || "Tầng 08 Số 122 Lý Thái Tông, Phường Thanh Khê, Thành Phố Đà Nẵng, Việt Nam",
       "coNoiBo": false,
+      "maSoThue": mstNguoiMua,
+      "nguoiBan": taxData.nbten || taxData.nguoiBan || "CÔNG TY CỔ PHẦN MARKEE",
+      "phanTram": 20,
+      "soHoaDon": cleanSoHD,
+      "tongTien": tgtttbso,
+      "khachHang": taxData.nmten || taxData.khachHang || "",
+      "trangThai": "Hóa đơn mới",
+      "donViTienTe": taxData.dvtte || "VND",
+      "mstNguoiBan": mstNguoiBan,
+      "nguonDuLieu": "CO_QUAN_THUE",
+      "workspaceId": "default",
       "coCoQuanThue": true,
-      "thieu": ["Category", "Bộ phận", "Dự án"],
-      "phanTram": 40,
+      "kyHieuHoaDon": cleanKyHieuHD,
+      "ketQuaKiemTra": "Đã cấp mã hóa đơn",
+      "tongTruocThue": tongTruocThueVal,
       "sanSangXacMinh": false,
-      ...(taxData.misaRawData ? { misaRawData: taxData.misaRawData } : {})
+      "trangThaiPhatHanh": "Đã cấp mã"
     };
 
     return {
@@ -553,7 +579,7 @@ async function runFullSyncProcess(startDateStr, endDateStr, syncType = 'MUA_VAO'
       sendLog(`🚀 Bắt đầu quy trình đồng bộ MISA meInvoice [${typeLabel}] từ ${startDateStr} đến ${endDateStr}...`, 'process');
       rawInvoices = await fetchMisaInvoices(startDateStr, endDateStr, syncType, sendLog);
     } else {
-      sendLog(`🚀 Bắt đầu quy trình đồng bộ Tổng cục Thuế [${typeLabel}] từ ${startDateStr} đến ${endDateStr}...`, 'process');
+      sendLog(`🚀 Bắt đầu quy trình đồng bộ Tổng cục Thuế [${typeLabel}] từ ${startDateStr}...`, 'process');
 
       sendLog(`🔑 Đang đọc Cookie 'jwt' từ domain hoadondientu.gdt.gov.vn...`, 'info');
       await getTaxAuthHeaders();
