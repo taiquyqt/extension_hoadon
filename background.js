@@ -200,9 +200,9 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
 
   sendLog(`🔍 Kết nối API MISA meInvoice (app3.meinvoice.vn)...`, 'process');
 
-  // Thử nghiệm định dạng ngày chuẩn ISO không chứa Z (YYYY-MM-DDTHH:mm:ss.000Z)
-  const fromIso = `${startDateStr}T00:00:00.000Z`;
-  const toIso = `${endDateStr}T23:59:59.000Z`;
+  // ĐỊNH DẠNG NGÀY CHO MISA: MISA C# NewtonSoft Parser yêu cầu YYYY-MM-DD HH:mm:ss (không chứa ký tự 'T')
+  const fromIso = `${startDateStr} 00:00:00`;
+  const toIso = `${endDateStr} 23:59:59`;
 
   const requestBody = new URLSearchParams({
     draw: 1,
@@ -210,7 +210,7 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
     toDate: toIso,
     publishStatus: -1,
     sendEmailStatus: -1,
-    filterInvoiceStatus: -1, // Tất cả trạng thái hóa đơn (thay vì 0)
+    filterInvoiceStatus: -1, // Tất cả trạng thái hóa đơn
     sendToTaxStatus: -1,
     invoiceSummaryStatus: -2,
     searchField: "InvNo",
@@ -254,6 +254,10 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
       sendLog(`❌ Lỗi parse JSON từ server MISA. Chi tiết xem trong Console (F12).`, 'error');
       console.error("[fetchMisaInvoices] Lỗi parse JSON:", parseErr, rawText);
       return [];
+    }
+
+    if (responseJson && responseJson.error) {
+      console.warn("[fetchMisaInvoices] MISA Backend báo lỗi:", responseJson.error);
     }
     
     // Parse 2 lớp cho responseJson.data của MISA
@@ -332,7 +336,6 @@ async function mapToSupabasePayload(taxData) {
     const mstNguoiBan = taxData.mstNguoiBan || taxData.nbmst || "";
     const mstNguoiMua = taxData.mstNguoiMua || taxData.nmmst || taxData.maSoThue || "";
     
-    // Đảm bảo tdlap lấy đúng phần ngày YYYY-MM-DD
     let tdlapStr = "";
     if (taxData.tdlap) {
       if (typeof taxData.tdlap === 'string') {
@@ -350,7 +353,6 @@ async function mapToSupabasePayload(taxData) {
     const soHoaDon = taxData.soHoaDon ? taxData.soHoaDon.toString() : (taxData.shdon ? taxData.shdon.toString() : "");
     const kyHieuHoaDon = taxData.kyHieuHoaDon || taxData.khhdon || "";
 
-    // UUID v5 cố định theo key: mstNguoiBan + kyHieuHoaDon + soHoaDon
     const rawInputKey = `${mstNguoiBan}${kyHieuHoaDon}${soHoaDon}`;
     const invoiceUuid = await generateUUIDv5(rawInputKey);
 
@@ -463,8 +465,6 @@ async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCall
     const displaySoHD = soHoaDon || `Row #${i+1}`;
 
     try {
-      // 1. TRUY VẤN KIỂM TRA TỒN TẠI (KIỂM TRA BẰNG ID HOẶC SỐ/KÝ HIỆU/MST HÓA ĐƠN)
-      // Query này lọc cả id = payload.id HOẶC (soHoaDon + kyHieuHoaDon + mstNguoiBan)
       const checkUrl = `${invoiceRawEndpoint}?select=id&or=(id.eq.${payload.id},and(data->>soHoaDon.eq.${encodeURIComponent(soHoaDon)},data->>kyHieuHoaDon.eq.${encodeURIComponent(kyHieuHoaDon)},data->>mstNguoiBan.eq.${encodeURIComponent(mstNguoiBan)}))`;
 
       const checkResponse = await fetch(checkUrl, {
@@ -485,18 +485,16 @@ async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCall
         continue;
       }
 
-      // NẾU ĐÃ TỒN TẠI RECORD -> BỎ QUA (SKIP)
       if (existingRecords.length > 0) {
         skippedCount++;
         sendLog(`[Bỏ qua] Hóa đơn số ${displaySoHD} (Ký hiệu: ${kyHieuHoaDon}, MST: ${mstNguoiBan}) đã có trong hệ thống.`, 'warn');
       } else {
-        // NẾU CHƯA TỒN TẠI -> THÊM MỚI (VỚI HEADER RESOLUTION=IGNORE-DUPLICATES ĐỂ CHẶN TRIỆT ĐỂ LỖI 409)
         const insertResponse = await fetch(invoiceRawEndpoint, {
           method: 'POST',
           headers: {
             ...commonHeaders,
             'Content-Type': 'application/json',
-            'Prefer': 'resolution=ignore-duplicates' // Tránh lỗi 409 nếu trùng khoá chính
+            'Prefer': 'resolution=ignore-duplicates'
           },
           body: JSON.stringify(payload)
         });
