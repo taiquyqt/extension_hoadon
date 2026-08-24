@@ -28,7 +28,7 @@ const INVOICE_NAMESPACE_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 
 // =========================================================================
-// 2. LOGIC LẤY COOKIES / AUTHENTICATION HEADERS (THUẾ & MISA)
+// 2. LOGIC LẤY COOKIES / AUTHENTICATION HEADERS (THUẾ)
 // =========================================================================
 
 /**
@@ -60,24 +60,6 @@ async function getTaxAuthHeaders() {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/plain, */*'
   };
-}
-
-/**
- * Lấy toàn bộ Cookie của trang MISA meInvoice (meinvoice.vn)
- * Nối tất cả Cookie lại thành chuỗi dạng `name=value; name2=value2`
- */
-async function getMisaCookies() {
-  if (typeof chrome !== 'undefined' && chrome.cookies && chrome.cookies.getAll) {
-    try {
-      const cookies = await chrome.cookies.getAll({ domain: "meinvoice.vn" });
-      if (cookies && cookies.length > 0) {
-        return cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      }
-    } catch (e) {
-      console.warn("[getMisaCookies] Không lấy được Cookie MISA:", e.message);
-    }
-  }
-  return "";
 }
 
 
@@ -141,7 +123,7 @@ function formatDateDDMMYYYY(dateInput) {
 
 
 // =========================================================================
-// 4. FETCH DỮ LIỆU TỪ 2 NGUỒN (THUẾ & MISA MEINVOICE AN TOÀN)
+// 4. FETCH DỮ LIỆU TỪ 2 NGUỒN (THUẾ & MISA MEINVOICE AN TOÀN CHUẨN AJAX)
 // =========================================================================
 
 /**
@@ -209,7 +191,10 @@ async function fetchTaxInvoices(type = 'MUA_VAO', chunks = [], onProgressCallbac
 
 /**
  * LUỒNG 2: Gọi API MISA meInvoice (app3.meinvoice.vn/v3/sainvoicewithcode/list)
- * Bắt lỗi an toàn khi phản hồi trả về HTML (Redirect trang login / Lỗi server)
+ * 
+ * - Credentials: 'include' (Chrome tự động đính kèm Cookie phiên MISA)
+ * - Header 'X-Requested-With': 'XMLHttpRequest' (BẮT BUỘC để MISA trả về JSON thay vì HTML)
+ * - Payload x-www-form-urlencoded chuẩn
  * 
  * @param {string} startDateStr - Ngày bắt đầu YYYY-MM-DD
  * @param {string} endDateStr - Ngày kết thúc YYYY-MM-DD
@@ -225,43 +210,32 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
 
   sendLog(`🔍 Kết nối API MISA meInvoice (app3.meinvoice.vn)...`, 'process');
 
-  const cookieHeader = await getMisaCookies();
-  if (!cookieHeader) {
-    sendLog(`⚠️ Không tìm thấy Cookie MISA meInvoice. Vui lòng mở trang và đăng nhập tại https://app3.meinvoice.vn!`, 'warn');
-  }
-
   // Chuyển đổi ngày từ YYYY-MM-DD sang định dạng chuẩn ISO String
   const fromIso = new Date(`${startDateStr}T00:00:00.000Z`).toISOString();
   const toIso = new Date(`${endDateStr}T23:59:59.000Z`).toISOString();
 
-  // Đóng gói tham số body URLSearchParams (application/x-www-form-urlencoded)
-  const bodyParams = new URLSearchParams();
-  bodyParams.append('draw', '1');
-  bodyParams.append('fromDate', fromIso);
-  bodyParams.append('toDate', toIso);
-  bodyParams.append('publishStatus', '-1');
-  bodyParams.append('sendEmailStatus', '-1');
-  bodyParams.append('filterInvoiceStatus', '0');
-  bodyParams.append('sendToTaxStatus', '-1');
-  bodyParams.append('invoiceSummaryStatus', '-2');
-  bodyParams.append('searchField', 'InvNo');
-  bodyParams.append('filterCustomField', 'false');
-
-  const headers = {
-    'Accept': 'application/json, text/plain, */*',
-    'Content-Type': 'application/x-www-form-urlencoded'
-  };
-
-  if (cookieHeader) {
-    headers['Cookie'] = cookieHeader;
-  }
-
   try {
+    // Gọi API MISA với cấu hình chuẩn AJAX và Credentials: include
     const response = await fetch(API_MISA_LIST_ENDPOINT, {
-      method: 'POST',
-      headers: headers,
-      body: bodyParams.toString(),
-      credentials: 'include'
+      method: "POST",
+      credentials: "include", // Quan trọng: Tự động đính kèm Cookie phiên MISA
+      headers: {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Requested-With": "XMLHttpRequest" // Quan trọng: Ép MISA trả về JSON thay vì HTML
+      },
+      body: new URLSearchParams({
+        draw: 1,
+        fromDate: fromIso,
+        toDate: toIso,
+        publishStatus: -1,
+        sendEmailStatus: -1,
+        filterInvoiceStatus: 0,
+        sendToTaxStatus: -1,
+        invoiceSummaryStatus: -2,
+        searchField: "InvNo",
+        filterCustomField: false
+      }).toString()
     });
 
     if (!response.ok) {
@@ -271,17 +245,15 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
       throw new Error(`Lỗi HTTP MISA API [${response.status}]: ${response.statusText}`);
     }
 
-    // YÊU CẦU 2: ĐỌC TEXT() ĐỂ KIỂM TRA TRÁNH CRASH ỨNG DỤNG NẾU SERVER MISA TRẢ VỀ HTML
+    // Đọc text() trước để kiểm tra tránh crash nếu trả về HTML
     const rawText = await response.text();
 
-    // Kiểm tra nếu phản hồi là HTML (bị redirect ra trang đăng nhập hoặc trang lỗi)
     if (rawText.trim().startsWith('<')) {
       sendLog(`❌ Lỗi MISA trả về HTML thay vì JSON. Chi tiết xem trong Console (F12).`, 'error');
       console.error("[fetchMisaInvoices] Server MISA trả về HTML:", rawText);
-      return []; // Trả về mảng rỗng để không làm gián đoạn hệ thống
+      return [];
     }
 
-    // Nếu an toàn, mới parse JSON
     let resJson = {};
     try {
       resJson = JSON.parse(rawText);
@@ -550,7 +522,7 @@ async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCall
 
 
 // =========================================================================
-// 7. CHẠY TOÀN BỘ QUY TRÌNH & ĐIỀU HƯỚNG ROUTING (SỬA LỖI PHÂN LUỒNG MISA)
+// 7. CHẠY TOÀN BỘ QUY TRÌNH & ĐIỀU HƯỚNG ROUTING
 // =========================================================================
 
 /**
@@ -566,19 +538,15 @@ async function runFullSyncProcess(startDateStr, endDateStr, syncType = 'MUA_VAO'
     const typeLabel = syncType === 'BAN_RA' ? 'BÁN RA' : 'MUA VÀO';
     let rawInvoices = [];
 
-    // YÊU CẦU 1: KIỂM TRA PHÂN LUỒNG MISA MEINVOICE (CHỈ CHẠY CHO BÁN RA)
     if (sourceDomain && sourceDomain.includes('meinvoice.vn')) {
       if (syncType !== 'BAN_RA') {
-        // TUYỆT ĐỐI KHÔNG CHẠY VÒNG LẶP HOẶC GỌI API CHO MUA_VAO KHI Ở TRANG MISA
         sendLog(`ℹ️ Phân hệ MISA meInvoice chỉ chứa Hóa đơn Bán ra. Hệ thống tự động bỏ qua luồng Mua vào.`, 'warn');
         return { success: true, addedCount: 0, skippedCount: 0 };
       }
 
-      // LUỒNG MISA MEINVOICE BÁN RA
       sendLog(`🚀 Bắt đầu quy trình đồng bộ MISA meInvoice [${typeLabel}] từ ${startDateStr} đến ${endDateStr}...`, 'process');
       rawInvoices = await fetchMisaInvoices(startDateStr, endDateStr, syncType, sendLog);
     } else {
-      // LUỒNG TỔNG CỤC THUẾ (MẶC ĐỊNH)
       sendLog(`🚀 Bắt đầu quy trình đồng bộ Tổng cục Thuế [${typeLabel}] từ ${startDateStr} đến ${endDateStr}...`, 'process');
 
       sendLog(`🔑 Đang đọc Cookie 'jwt' từ domain hoadondientu.gdt.gov.vn...`, 'info');
@@ -598,7 +566,6 @@ async function runFullSyncProcess(startDateStr, endDateStr, syncType = 'MUA_VAO'
       return { success: true, addedCount: 0, skippedCount: 0 };
     }
 
-    // CẢ 2 LUỒNG ĐỀU CHUẨN HÓA VÀ ĐẨY QUA syncToSupabase
     sendLog(`⏳ Đang khởi tạo mã UUID v5 & chuẩn hóa Payload...`, 'process');
     const payloadArray = [];
     for (const itemData of rawInvoices) {
