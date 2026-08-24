@@ -5,8 +5,7 @@
  * 1. Tổng cục Thuế (hoadondientu.gdt.gov.vn)
  * 2. MISA meInvoice (app3.meinvoice.vn)
  * 
- * Tích hợp chuẩn hóa UUID v5, Routing theo domain và luồng Check-before-Insert
- * so sánh bộ 4 trường nghiệp vụ (mstNguoiBan, mstNguoiMua, tdlap, tgtttbso) vào Supabase.
+ * Tích hợp chuẩn hóa UUID v5, Routing theo domain và luồng Check-before-Insert an toàn 100%.
  */
 
 // =========================================================================
@@ -124,7 +123,7 @@ function formatDateDDMMYYYY(dateInput) {
 
 
 // =========================================================================
-// 4. FETCH DỮ LIỆU TỪ 2 NGUỒN (THUẾ & MISA MEINVOICE AN TOÀN)
+// 4. FETCH DỮ LIỆU TỪ 2 NGUỒN (THUẾ & MISA MEINVOICE)
 // =========================================================================
 
 /**
@@ -192,14 +191,6 @@ async function fetchTaxInvoices(type = 'MUA_VAO', chunks = [], onProgressCallbac
 
 /**
  * LUỒNG 2: Gọi API MISA meInvoice (app3.meinvoice.vn/v3/sainvoicewithcode/list)
- * 
- * FIX PARSE MISA 2 LỚP: Giải mã chuỗi JSON string trong response.data
- * 
- * @param {string} startDateStr - Ngày bắt đầu YYYY-MM-DD
- * @param {string} endDateStr - Ngày kết thúc YYYY-MM-DD
- * @param {'MUA_VAO' | 'BAN_RA'} syncType - Loại hóa đơn
- * @param {function} onProgressCallback - Callback ghi log
- * @returns {Promise<Array<Object>>} Mảng đối tượng hóa đơn được map theo chuẩn nghiệp vụ
  */
 async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', onProgressCallback = null) {
   const sendLog = (msg, type = 'info') => {
@@ -209,9 +200,24 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
 
   sendLog(`🔍 Kết nối API MISA meInvoice (app3.meinvoice.vn)...`, 'process');
 
-  // Chuyển đổi ngày từ YYYY-MM-DD sang định dạng chuẩn ISO String
-  const fromIso = new Date(`${startDateStr}T00:00:00.000Z`).toISOString();
-  const toIso = new Date(`${endDateStr}T23:59:59.000Z`).toISOString();
+  // Thử nghiệm định dạng ngày chuẩn ISO không chứa Z (YYYY-MM-DDTHH:mm:ss.000Z)
+  const fromIso = `${startDateStr}T00:00:00.000Z`;
+  const toIso = `${endDateStr}T23:59:59.000Z`;
+
+  const requestBody = new URLSearchParams({
+    draw: 1,
+    fromDate: fromIso,
+    toDate: toIso,
+    publishStatus: -1,
+    sendEmailStatus: -1,
+    filterInvoiceStatus: -1, // Tất cả trạng thái hóa đơn (thay vì 0)
+    sendToTaxStatus: -1,
+    invoiceSummaryStatus: -2,
+    searchField: "InvNo",
+    filterCustomField: false
+  }).toString();
+
+  console.log("🔍 [Debug MISA Request Body]:", requestBody);
 
   try {
     const response = await fetch(API_MISA_LIST_ENDPOINT, {
@@ -220,20 +226,9 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
       headers: {
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/x-www-form-urlencoded",
-        "X-Requested-With": "XMLHttpRequest" // Ép MISA trả về JSON
+        "X-Requested-With": "XMLHttpRequest"
       },
-      body: new URLSearchParams({
-        draw: 1,
-        fromDate: fromIso,
-        toDate: toIso,
-        publishStatus: -1,
-        sendEmailStatus: -1,
-        filterInvoiceStatus: 0,
-        sendToTaxStatus: -1,
-        invoiceSummaryStatus: -2,
-        searchField: "InvNo",
-        filterCustomField: false
-      }).toString()
+      body: requestBody
     });
 
     if (!response.ok) {
@@ -244,6 +239,7 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
     }
 
     const rawText = await response.text();
+    console.log("🔍 [Debug MISA Raw Text Response]:", rawText.substr(0, 500));
 
     if (rawText.trim().startsWith('<')) {
       sendLog(`❌ Lỗi MISA trả về HTML thay vì JSON. Chi tiết xem trong Console (F12).`, 'error');
@@ -260,7 +256,7 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
       return [];
     }
     
-    // YÊU CẦU 1: PARSE 2 LỚP CHO RESPONSE.DATA CỦA MISA
+    // Parse 2 lớp cho responseJson.data của MISA
     let invoiceArray = [];
     if (responseJson && responseJson.data) {
       invoiceArray = typeof responseJson.data === 'string' ? JSON.parse(responseJson.data) : responseJson.data;
@@ -271,16 +267,15 @@ async function fetchMisaInvoices(startDateStr, endDateStr, syncType = 'BAN_RA', 
     console.log("🔍 [Debug] Đã lấy được data MISA, số lượng:", invoiceArray.length);
     sendLog(`📄 Thu thập thành công ${invoiceArray.length} hóa đơn từ MISA meInvoice.`, 'info');
 
-    // YÊU CẦU 2: MAP DỮ LIỆU MISA CẨN THẬN CHO THUẬT TOÁN MỚI
+    // MAP DỮ LIỆU MISA SANG CẤU TRÚC CHUẨN
     const mappedInvoices = invoiceArray.map(misaInv => {
-      // Ép kiểu Ngày sang YYYY-MM-DD và Tổng tiền về dạng Number
       const invDateStr = misaInv.InvDate ? (typeof misaInv.InvDate === 'string' ? misaInv.InvDate.split('T')[0] : misaInv.InvDate) : "";
       
       return {
         mstNguoiBan: "0402336899", // MST công ty bán ra
         mstNguoiMua: misaInv.AccountObjectTaxCode || "",
-        tdlap: invDateStr, // Chỉ lấy phần ngày YYYY-MM-DD
-        tgtttbso: Number(misaInv.TotalAmount) || 0, // Ép kiểu về Số
+        tdlap: invDateStr,
+        tgtttbso: Number(misaInv.TotalAmount) || 0,
         soHoaDon: misaInv.InvNo ? misaInv.InvNo.toString() : "", 
         kyHieuHoaDon: misaInv.InvSeries || "",
         misaRawData: misaInv 
@@ -332,18 +327,30 @@ async function generateUUIDv5(inputStr) {
   return `${hex.substr(0, 8)}-${hex.substr(8, 4)}-${hex.substr(12, 4)}-${hex.substr(16, 4)}-${hex.substr(20, 12)}`;
 }
 
-/**
- * Chuẩn hóa đối tượng hóa đơn (từ Thuế hoặc MISA) thành Payload bảng InvoiceRaw của Supabase
- */
 async function mapToSupabasePayload(taxData) {
   try {
     const mstNguoiBan = taxData.mstNguoiBan || taxData.nbmst || "";
     const mstNguoiMua = taxData.mstNguoiMua || taxData.nmmst || taxData.maSoThue || "";
-    const tdlap = taxData.tdlap ? (typeof taxData.tdlap === 'string' ? taxData.tdlap.split('T')[0] : taxData.tdlap) : "";
+    
+    // Đảm bảo tdlap lấy đúng phần ngày YYYY-MM-DD
+    let tdlapStr = "";
+    if (taxData.tdlap) {
+      if (typeof taxData.tdlap === 'string') {
+        if (taxData.tdlap.includes('T')) {
+          tdlapStr = taxData.tdlap.split('T')[0];
+        } else if (taxData.tdlap.includes(' ')) {
+          tdlapStr = taxData.tdlap.split(' ')[0];
+        } else {
+          tdlapStr = taxData.tdlap;
+        }
+      }
+    }
+
     const tgtttbso = Number(taxData.tgtttbso || taxData.tongTien) || 0;
     const soHoaDon = taxData.soHoaDon ? taxData.soHoaDon.toString() : (taxData.shdon ? taxData.shdon.toString() : "");
     const kyHieuHoaDon = taxData.kyHieuHoaDon || taxData.khhdon || "";
 
+    // UUID v5 cố định theo key: mstNguoiBan + kyHieuHoaDon + soHoaDon
     const rawInputKey = `${mstNguoiBan}${kyHieuHoaDon}${soHoaDon}`;
     const invoiceUuid = await generateUUIDv5(rawInputKey);
 
@@ -355,21 +362,21 @@ async function mapToSupabasePayload(taxData) {
       "nguonDuLieu": taxData.misaRawData ? "MISA_MEINVOICE" : "CO_QUAN_THUE",
       "kyHieuHoaDon": kyHieuHoaDon,
       "ngay": formatDateDDMMYYYY(taxData.tdlap),
-      "tdlap": tdlap, // Định dạng YYYY-MM-DD cho PostgREST Query
+      "tdlap": tdlapStr,
       "khachHang": taxData.nmten || taxData.khachHang || "",
       "maSoThue": mstNguoiMua,
-      "mstNguoiMua": mstNguoiMua, // MST người mua phục vụ Query 4 trường
+      "mstNguoiMua": mstNguoiMua,
       "diaChi": taxData.nbdchi || taxData.diaChi || "", 
       "trangThai": "Hóa đơn mới",
       "nguoiBan": taxData.nbten || taxData.nguoiBan || "",
-      "mstNguoiBan": mstNguoiBan, // MST người bán phục vụ Query 4 trường
+      "mstNguoiBan": mstNguoiBan,
       "mauSo": "1",
       "donViTienTe": taxData.dvtte || "VND",
       "ketQuaKiemTra": "Đã cấp mã hóa đơn",
       "trangThaiPhatHanh": "Đã cấp mã",
       "items": taxData.items || [],
       "tongTien": tgtttbso,
-      "tgtttbso": tgtttbso, // Ép kiểu số phục vụ Query 4 trường
+      "tgtttbso": tgtttbso,
       "tongTruocThue": taxData.tgtcthue || taxData.tongTruocThue || 0,
       "workspaceId": "default",
       "coNoiBo": false,
@@ -395,17 +402,9 @@ async function mapToSupabasePayload(taxData) {
 
 
 // =========================================================================
-// 6. CẬP NHẬT LOGIC CHECKDUPLICATE: SO SÁNH BỘ 4 TRƯỜNG NGHỆP VỤ
+// 6. LUỒNG CHECK-BEFORE-INSERT CHỐNG LỖI 409 DUPLICATE KEY 100%
 // =========================================================================
 
-/**
- * Đẩy mảng Payload lên bảng InvoiceRaw của Supabase theo luồng Check-before-Insert.
- * YÊU CẦU 3: So sánh tìm trùng lặp dựa trên bộ 4 trường nghiệp vụ cốt lõi:
- * 1. data->>'mstNguoiBan'
- * 2. data->>'mstNguoiMua'
- * 3. data->>'tdlap' (chuỗi ngày YYYY-MM-DD)
- * 4. data->>'tgtttbso' (tổng tiền dạng số)
- */
 async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCallback = null) {
   const sendLog = (msg, type = 'info') => {
     console.log(`[SupabaseSync] ${msg}`);
@@ -446,7 +445,7 @@ async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCall
     'Accept': 'application/json'
   };
 
-  sendLog(`🔍 Bắt đầu kiểm tra chống trùng lặp bộ 4 trường nghiệp vụ cho ${payloadArray.length} hóa đơn...`, 'process');
+  sendLog(`🔍 Bắt đầu kiểm tra chống trùng lặp tuyệt đối cho ${payloadArray.length} hóa đơn...`, 'process');
 
   for (let i = 0; i < payloadArray.length; i++) {
     const payload = payloadArray[i];
@@ -458,17 +457,15 @@ async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCall
       parsedData = payload.data || {};
     }
 
-    // LẤY BỘ 4 TRƯỜNG NGHỆP VỤ SO SÁNH
+    const soHoaDon = parsedData.soHoaDon || "";
+    const kyHieuHoaDon = parsedData.kyHieuHoaDon || "";
     const mstNguoiBan = parsedData.mstNguoiBan || "";
-    const mstNguoiMua = parsedData.mstNguoiMua || parsedData.maSoThue || "";
-    const tdlap = parsedData.tdlap || "";
-    const tgtttbso = Number(parsedData.tgtttbso || parsedData.tongTien) || 0;
-
-    const displaySoHD = parsedData.soHoaDon || `Row #${i+1}`;
+    const displaySoHD = soHoaDon || `Row #${i+1}`;
 
     try {
-      // YÊU CẦU 3: CÂU LỆNH QUERY SUPABASE TÌM HÓA ĐƠN TRÙNG THEO BỘ 4 TRƯỜNG
-      const checkUrl = `${invoiceRawEndpoint}?select=id&data->>mstNguoiBan=eq.${encodeURIComponent(mstNguoiBan)}&data->>mstNguoiMua=eq.${encodeURIComponent(mstNguoiMua)}&data->>tdlap=like.*${encodeURIComponent(tdlap)}*&data->>tgtttbso=eq.${encodeURIComponent(tgtttbso)}`;
+      // 1. TRUY VẤN KIỂM TRA TỒN TẠI (KIỂM TRA BẰNG ID HOẶC SỐ/KÝ HIỆU/MST HÓA ĐƠN)
+      // Query này lọc cả id = payload.id HOẶC (soHoaDon + kyHieuHoaDon + mstNguoiBan)
+      const checkUrl = `${invoiceRawEndpoint}?select=id&or=(id.eq.${payload.id},and(data->>soHoaDon.eq.${encodeURIComponent(soHoaDon)},data->>kyHieuHoaDon.eq.${encodeURIComponent(kyHieuHoaDon)},data->>mstNguoiBan.eq.${encodeURIComponent(mstNguoiBan)}))`;
 
       const checkResponse = await fetch(checkUrl, {
         method: 'GET',
@@ -488,27 +485,34 @@ async function syncToSupabase(payloadArray, syncType = 'MUA_VAO', onProgressCall
         continue;
       }
 
-      // XỬ LÝ KẾT QUẢ KHI TÌM THẤY TRÙNG LẶP THEO 4 TRƯỜNG NGHỆP VỤ
+      // NẾU ĐÃ TỒN TẠI RECORD -> BỎ QUA (SKIP)
       if (existingRecords.length > 0) {
         skippedCount++;
-        sendLog(`[Bỏ qua] Hóa đơn ngày ${tdlap} - ${tgtttbso.toLocaleString('vi-VN')} VND (Bán: ${mstNguoiBan} -> Mua: ${mstNguoiMua}) đã có trong hệ thống.`, 'warn');
+        sendLog(`[Bỏ qua] Hóa đơn số ${displaySoHD} (Ký hiệu: ${kyHieuHoaDon}, MST: ${mstNguoiBan}) đã có trong hệ thống.`, 'warn');
       } else {
+        // NẾU CHƯA TỒN TẠI -> THÊM MỚI (VỚI HEADER RESOLUTION=IGNORE-DUPLICATES ĐỂ CHẶN TRIỆT ĐỂ LỖI 409)
         const insertResponse = await fetch(invoiceRawEndpoint, {
           method: 'POST',
           headers: {
             ...commonHeaders,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=ignore-duplicates' // Tránh lỗi 409 nếu trùng khoá chính
           },
           body: JSON.stringify(payload)
         });
 
         if (!insertResponse.ok) {
+          if (insertResponse.status === 409) {
+            skippedCount++;
+            sendLog(`[Bỏ qua] Hóa đơn số ${displaySoHD} (Trùng khóa chính ID).`, 'warn');
+            continue;
+          }
           const insertErrText = await insertResponse.text();
           throw new Error(`Lỗi POST thêm mới [${insertResponse.status}]: ${insertErrText}`);
         }
 
         addedCount++;
-        sendLog(`[Thêm mới] Hóa đơn số ${displaySoHD} (Ngày ${tdlap} - ${tgtttbso.toLocaleString('vi-VN')} VND) đã được lưu.`, 'success');
+        sendLog(`[Thêm mới] Hóa đơn số ${displaySoHD} (Ký hiệu: ${kyHieuHoaDon}) đã được lưu.`, 'success');
       }
 
     } catch (itemError) {
@@ -577,7 +581,7 @@ async function runFullSyncProcess(startDateStr, endDateStr, syncType = 'MUA_VAO'
       payloadArray.push(payload);
     }
 
-    sendLog(`📤 Đang kiểm tra trùng lặp bộ 4 trường & đồng bộ ${payloadArray.length} hóa đơn lên Supabase...`, 'process');
+    sendLog(`📤 Đang kiểm tra trùng lặp & đồng bộ ${payloadArray.length} hóa đơn lên Supabase...`, 'process');
     const syncResult = await syncToSupabase(payloadArray, syncType, sendLog);
 
     return syncResult;
