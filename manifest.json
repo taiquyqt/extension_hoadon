@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "ExtensionHoaDon - Đồng Bộ Hóa Đơn Thuế & MISA",
+  "version": "1.0.0",
+  "description": "Hỗ trợ kế toán đồng bộ dữ liệu hóa đơn từ trang web của Tổng cục Thuế và MISA meInvoice về hệ thống quản trị nội bộ.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "alarms",
+    "cookies"
+  ],
+  "host_permissions": [
+    "*://hoadondientu.gdt.gov.vn/*",
+    "*://*.meinvoice.vn/*",
+    "https://*.supabase.co/*",
+    "https://hoadon.db.markeeai.com/*",
+    "https://*.markeeai.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ExtensionHoaDon"
+  }
+}
